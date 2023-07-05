@@ -318,7 +318,7 @@ Entry=namedtuple('Entry',['chunks','clen','mtf'])
 
 def compress2(w,code,size_handler=None,fail_on_error=True):
     def CHR(ch,mtf):
-        """ note: updated mtf """
+        """ note: this modifies mtf """
         idx=mtf.index(ch)
         update_mtf(mtf,idx,ch)
         cost=6+2*bisect([16,48,112,240],idx)
@@ -344,8 +344,7 @@ def compress2(w,code,size_handler=None,fail_on_error=True):
 
     def compress_prefix_options(idx):
         if idx==0:
-            HEADER_LEN_BITS=64
-            chunks,clen,mtf = [],HEADER_LEN_BITS,[chr(i) for i in range(0x100)]
+            chunks,clen,mtf = [],0,[chr(i) for i in range(0x100)]
             yield Entry(chunks,clen,mtf)
             return
 
@@ -384,17 +383,19 @@ def compress2(w,code,size_handler=None,fail_on_error=True):
 
     def best_prefix_option(idx):
         opts=list(compress_prefix_options(idx))
-        print("options",idx,code[:idx])
-        for o in opts:
-            print('  ',o.clen,o.chunks )# ,o.mtf[:8],'...')
-        return min(opts,key=lambda o: o.clen) #itemgetter('clen'))
+        # print("options",idx,code[:idx])
+        # for o in opts:
+        #     print('  ',o.clen,o.chunks )# ,o.mtf[:8],'...')
+        best=min(opts,key=lambda o: o.clen) #itemgetter('clen'))
+        print('tie',idx,sum(o.clen==best.clen for o in opts))
+        return best
 
     # find best compression
     dptab = [] # i => (chunks,clen,mtf) mapping
     for idx in range(len(code)+1):
         # compress code[:idx], store in dptab[idx]
         dptab.append(best_prefix_option(idx))
-        print('best',idx,dptab[idx].clen,dptab[idx].chunks,'\n')
+        # print('best',idx,dptab[idx].clen,dptab[idx].chunks,'\n')
     
     # write
     bw = BinaryBitWriter(w.f)
