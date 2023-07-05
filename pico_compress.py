@@ -314,6 +314,9 @@ from bisect import bisect
 from operator import itemgetter
 from collections import namedtuple
 
+# chunks: list of CHR/REF/RAW chunks
+# clen: total bit cost for the list of chunks
+# mtf: the 256-entry mtf table at this point in the parse
 Entry=namedtuple('Entry',['chunks','clen','mtf'])
 
 def compress2(w,code,size_handler=None,fail_on_error=True):
@@ -337,11 +340,10 @@ def compress2(w,code,size_handler=None,fail_on_error=True):
 
     def clone_prefix_best(idx):
         assert(0<=idx and idx<=len(code))
-        for entry in dptab[idx]:
-            chunks = entry.chunks[:]
-            clen = entry.clen
-            mtf = entry.mtf[:]
-            yield chunks,clen,mtf
+        chunks = dptab[idx].chunks[:]
+        clen = dptab[idx].clen
+        mtf = dptab[idx].mtf[:]
+        return chunks,clen,mtf
 
     def compress_prefix_options(idx):
         if idx==0:
@@ -350,52 +352,54 @@ def compress2(w,code,size_handler=None,fail_on_error=True):
             return
 
         # try CHR chunk
-        for chunks,clen,mtf in clone_prefix_best(idx-1):
-            chunk,cost = CHR(code[idx-1],mtf)
-            chunks.append(chunk)
-            clen+=cost
-            yield Entry(chunks,clen,mtf)
+        chunks,clen,mtf=clone_prefix_best(idx-1)
+        chunk,cost = CHR(code[idx-1],mtf)
+        chunks.append(chunk)
+        clen+=cost
+
+        yield Entry(chunks,clen,mtf)
 
         # try REF chunks
         # for each reflen (3,4,...) try first closest backref
         reflen=3
         for jdx in reversed(range(0,idx-3)):
             if code[jdx:jdx+reflen]==code[idx-reflen:idx]: # slice at jdx equal to the last chars
-                for chunks,clen,mtf in clone_prefix_best(idx-reflen):
-                    chunk,cost = REF(idx-reflen-jdx,reflen)
-                    chunks.append(chunk)
-                    clen+=cost
-                    yield Entry(chunks,clen,mtf)
+                chunks,clen,mtf=clone_prefix_best(idx-reflen)
+
+                chunk,cost = REF(idx-reflen-jdx,reflen)
+                chunks.append(chunk)
+                clen+=cost
+
+                yield Entry(chunks,clen,mtf)
+
                 reflen+=1
 
         # try RAW chunks
         for jdx in reversed(range(0,idx)):
-            for chunks,clen,mtf in clone_prefix_best(jdx):
-                if jdx==0 or chunks[-1][0]!='REF':
-                    chunk,cost = RAW(jdx,idx-jdx)
-                    chunks.append(chunk)
-                    clen+=cost
+            chunks,clen,mtf=clone_prefix_best(jdx)
 
-                    yield Entry(chunks,clen,mtf)
+            chunk,cost = RAW(jdx,idx-jdx)
+            chunks.append(chunk)
+            clen+=cost
 
-    # returns every Entry with a unique mtf (most of them)
+            yield Entry(chunks,clen,mtf)
+
     def best_prefix_option(idx):
         opts=list(compress_prefix_options(idx))
         # print("options",idx,code[:idx])
         # for o in opts:
         #     print('  ',o.clen,o.chunks )# ,o.mtf[:8],'...')
-        # best=min(opts,key=lambda o: o.clen) #itemgetter('clen'))
+        best=min(opts,key=lambda o: o.clen) #itemgetter('clen'))
         # print('tie',idx,sum(o.clen==best.clen for o in opts))
-        return opts
+        return best
 
     # find best compression
     dptab = [] # i => (chunks,clen,mtf) mapping
     for idx in range(len(code)+1):
-        print('%d/%d'%(idx,len(code)))
         # compress code[:idx], store in dptab[idx]
         dptab.append(best_prefix_option(idx))
         # print('best',idx,dptab[idx].clen,dptab[idx].chunks,'\n')
-    best_chunks=min(dptab[-1],key=lambda o: o.clen).chunks
+    best_chunks=dptab[-1].chunks
     
     # write
     bw = BinaryBitWriter(w.f)
