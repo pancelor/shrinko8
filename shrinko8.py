@@ -77,6 +77,7 @@ pgroup.add_argument("--extra-output", nargs='+', action="append", metavar=("OUTP
 pgroup = parser.add_argument_group("compression options (semi-undocumented)")
 pgroup.add_argument("--keep-compression", action="store_true", help="keep existing compression, instead of re-compressing")
 pgroup.add_argument("--fast-compression", action="store_true", help="force fast but poor compression (when creating png carts)")
+pgroup.add_argument("--best-compression", action="store_true", help="pancelor best compression")
 pgroup.add_argument("--force-compression", action="store_true", help="force code compression even if code fits (when creating png carts)")
 pgroup.add_argument("--old-compression", action="store_true", help="compress with the old pre-v0.2.0 compression scheme")
 pgroup.add_argument("--trace-compression", help="trace the compressed symbols and their cost into this file")
@@ -232,7 +233,7 @@ def main_inner(raw_args):
     if args.count:
         write_code_size(cart, handler=args.count)
         if not (args.output and str(args.format) not in CartFormat._src_names) and not args.no_count_compress: # else, will be done in write_cart
-            write_compressed_size(cart, handler=args.count, fast_compress=args.fast_compression)
+            write_compressed_size(cart, handler=args.count, best_compress=args.best_compression,fast_compress=args.fast_compression)
 
     if args.output:
         all_outputs = [(args.output, args.format)]
@@ -251,7 +252,7 @@ def main_inner(raw_args):
                         debug_handler=args.trace_compression,
                         unicode_caps=args.unicode_caps, old_compress=args.old_compression,
                         force_compress=args.count or args.force_compression,
-                        fast_compress=args.fast_compression, keep_compression=args.keep_compression,
+                        best_compress=args.best_compression,fast_compress=args.fast_compression, keep_compression=args.keep_compression,
                         screenshot_path=args.label, title=args.title)
             except OSError as e:
                 throw("cannot write cart: %s" % e)

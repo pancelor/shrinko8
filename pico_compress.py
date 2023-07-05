@@ -310,10 +310,176 @@ def get_lz77(code, min_c=3, max_c=0x7fff, max_o=0x7fff, measure=None, max_o_step
     
     assert not curr_adv
 
+from bisect import bisect
+from operator import itemgetter
+from collections import namedtuple
+
+Entry=namedtuple('Entry',['chunks','clen','mtf'])
+
+def compress2(w,code,size_handler=None,fail_on_error=True):
+    def CHR(ch,mtf):
+        """ note: updated mtf """
+        idx=mtf.index(ch)
+        update_mtf(mtf,idx,ch)
+        cost=6+2*bisect([16,48,112,240],idx)
+        return ('CHR',ch),cost
+
+    def REF(offset,length):
+        cost_offset=8+5*bisect([33,1025],offset)
+        cost_length=((length+4)//7)*3
+        return ('REF',offset,length),cost_offset+cost_length
+
+    def RAW(start,length):
+        cost=13 # header
+        cost+=length*8
+        cost+=1 # footer
+        return ('RAW',start,length),cost
+
+    def clone_prefix_best(idx):
+        assert(0<=idx and idx<=len(code))
+        chunks = dptab[idx].chunks[:]
+        clen = dptab[idx].clen
+        mtf = dptab[idx].mtf[:]
+        return chunks,clen,mtf
+
+    def compress_prefix_options(idx):
+        if idx==0:
+            HEADER_LEN_BITS=64
+            chunks,clen,mtf = [],HEADER_LEN_BITS,[chr(i) for i in range(0x100)]
+            yield Entry(chunks,clen,mtf)
+            return
+
+        # try CHR chunk
+        chunks,clen,mtf=clone_prefix_best(idx-1)
+        chunk,cost = CHR(code[idx-1],mtf)
+        chunks.append(chunk)
+        clen+=cost
+
+        yield Entry(chunks,clen,mtf)
+
+        # try REF chunks
+        # for each reflen (3,4,...) try first closest backref
+        reflen=3
+        for jdx in reversed(range(0,idx-3)):
+            if code[jdx:jdx+reflen]==code[idx-reflen:idx]: # slice at jdx equal to the last chars
+                chunks,clen,mtf=clone_prefix_best(idx-reflen)
+
+                chunk,cost = REF(idx-reflen-jdx,reflen)
+                chunks.append(chunk)
+                clen+=cost
+
+                yield Entry(chunks,clen,mtf)
+
+                reflen+=1
+
+        # try RAW chunks. todo: ignore obviously bad options (e.g. we ignore 1-char RAW chunks but maybe 2 or 3 as well)
+        for jdx in reversed(range(0,idx)):
+            chunks,clen,mtf=clone_prefix_best(jdx)
+
+            chunk,cost = RAW(jdx,idx-jdx)
+            chunks.append(chunk)
+            clen+=cost
+
+            yield Entry(chunks,clen,mtf)
+
+    def best_prefix_option(idx):
+        opts=list(compress_prefix_options(idx))
+        print("options",idx,code[:idx])
+        for o in opts:
+            print('  ',o.clen,o.chunks )# ,o.mtf[:8],'...')
+        return min(opts,key=lambda o: o.clen) #itemgetter('clen'))
+
+    # find best compression
+    dptab = [] # i => (chunks,clen,mtf) mapping
+    for idx in range(len(code)+1):
+        # compress code[:idx], store in dptab[idx]
+        dptab.append(best_prefix_option(idx))
+        print('best',idx,dptab[idx].clen,dptab[idx].chunks,'\n')
+    
+    # write
+    bw = BinaryBitWriter(w.f)
+    mtf = [chr(i) for i in range(0x100)]
+    def write_match(offset_val, count_val):
+        bw.bit(0)
+        
+        offset_bits = max(round_up(count_significant_bits(offset_val), 5), 5)
+        assert offset_bits in (5, 10, 15)
+        bw.bit(offset_bits < 15)
+        if offset_bits < 15:
+            bw.bit(offset_bits < 10)
+        bw.bits(offset_bits, offset_val)
+        
+        while count_val >= 7:
+            bw.bits(3, 7)
+            count_val -= 7
+        bw.bits(3, count_val)
+        print('write_match\t',bw.bit_position-start_pos_bw,offset_val,count_val)
+
+    def write_literal(ch):
+        bw.bit(1)
+        ch_i = mtf.index(ch)
+        
+        i_val = ch_i 
+        i_bits = 4
+        while i_val >= (1 << i_bits):
+            bw.bit(1)
+            i_val -= 1 << i_bits
+            i_bits += 1
+            
+        bw.bit(0)
+        bw.bits(i_bits, i_val)
+                        
+        update_mtf(mtf, ch_i, ch)
+        print('write_literal\t',bw.bit_position-start_pos_bw,ch,ord(ch))
+
+    def write_litblock(str):
+        bw.bit(0); bw.bit(1); bw.bit(0)
+        bw.bits(10, 0)
+
+        for ch in str:
+            bw.bits(8, ord(ch))
+        bw.bits(8, 0)
+        print('write_litblock\t',bw.bit_position-start_pos_bw,str)
+
+    start_pos = w.pos()
+    w.bytes(k_new_compressed_code_header)
+    w.u16(len(code) & 0xffff) # only throw under fail_on_error below
+    len_pos = w.pos()
+    w.u16(0) # revised below
+    start_pos_bw = bw.bit_position
+
+    for chunk in dptab[-1].chunks:
+        if chunk[0]=='REF':
+            offset,length=chunk[1],chunk[2]
+            write_match(offset-1,length-3)
+        elif chunk[0]=='CHR':
+            ch=chunk[1]
+            write_literal(ch)
+        elif chunk[0]=='RAW':
+            start,length=chunk[1],chunk[2]
+            write_litblock(code[start:start+length])
+    bw.flush()
+
+    size = w.pos() - start_pos
+    if size_handler:
+        print_compressed_size(size, handler=size_handler)
+    
+    if fail_on_error:
+        check(len(code) < 0x10000, "cart has too many characters!")
+        check(size <= k_code_size, "cart takes too much compressed space!")
+    
+    w.setpos(len_pos)
+    w.u16(size & 0xffff) # only throw under fail_on_error above
+
 def compress_code(w, code, size_handler=None, debug_handler=None, force_compress=False, 
-                  fail_on_error=True, fast_compress=False, old_compress=False, **_):
+                  fail_on_error=True, best_compress=False, fast_compress=False, old_compress=False, **_):
     is_new = not old_compress
     min_c = 3
+
+    print('code',len(code),code)
+    if best_compress:
+        assert(is_new)
+        return compress2(w,code,fail_on_error=fail_on_error,size_handler=size_handler)
     
     if len(code) >= k_code_size or force_compress: # (>= due to null)
         start_pos = w.pos()
@@ -324,6 +490,7 @@ def compress_code(w, code, size_handler=None, debug_handler=None, force_compress
                 
         if is_new:
             bw = BinaryBitWriter(w.f)
+            start_pos_bw = bw.bit_position
             if debug_handler: debug_handler.init(bw)
             mtf = [chr(i) for i in range(0x100)]
 
@@ -412,6 +579,7 @@ def compress_code(w, code, size_handler=None, debug_handler=None, force_compress
                     bw.bits(3, 7)
                     count_val -= 7
                 bw.bits(3, count_val)
+                print('write_match\t',bw.bit_position-start_pos_bw,offset_val,count_val)
 
             def write_literal(ch):
                 bw.bit(1)
@@ -428,6 +596,7 @@ def compress_code(w, code, size_handler=None, debug_handler=None, force_compress
                 bw.bits(i_bits, i_val)
                                 
                 update_mtf(mtf, ch_i, ch)
+                print('write_literal\t',bw.bit_position-start_pos_bw,ch,ord(ch))
 
             def write_litblock(str):
                 bw.bit(0); bw.bit(1); bw.bit(0)
@@ -436,6 +605,7 @@ def compress_code(w, code, size_handler=None, debug_handler=None, force_compress
                 for ch in str:
                     bw.bits(8, ord(ch))
                 bw.bits(8, 0)
+                print('write_litblock\t',bw.bit_position-start_pos_bw,str)
 
             if fast_compress:
                 items = get_lz77(code, min_c=min_c, max_c=None, fast_c=16)
