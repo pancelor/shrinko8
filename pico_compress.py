@@ -337,10 +337,11 @@ def compress2(w,code,size_handler=None,fail_on_error=True):
 
     def clone_prefix_best(idx):
         assert(0<=idx and idx<=len(code))
-        chunks = dptab[idx].chunks[:]
-        clen = dptab[idx].clen
-        mtf = dptab[idx].mtf[:]
-        return chunks,clen,mtf
+        for entry in dptab[idx]:
+            chunks = entry.chunks[:]
+            clen = entry.clen
+            mtf = entry.mtf[:]
+            yield chunks,clen,mtf
 
     def compress_prefix_options(idx):
         if idx==0:
@@ -349,53 +350,52 @@ def compress2(w,code,size_handler=None,fail_on_error=True):
             return
 
         # try CHR chunk
-        chunks,clen,mtf=clone_prefix_best(idx-1)
-        chunk,cost = CHR(code[idx-1],mtf)
-        chunks.append(chunk)
-        clen+=cost
-
-        yield Entry(chunks,clen,mtf)
+        for chunks,clen,mtf in clone_prefix_best(idx-1):
+            chunk,cost = CHR(code[idx-1],mtf)
+            chunks.append(chunk)
+            clen+=cost
+            yield Entry(chunks,clen,mtf)
 
         # try REF chunks
         # for each reflen (3,4,...) try first closest backref
         reflen=3
         for jdx in reversed(range(0,idx-3)):
             if code[jdx:jdx+reflen]==code[idx-reflen:idx]: # slice at jdx equal to the last chars
-                chunks,clen,mtf=clone_prefix_best(idx-reflen)
-
-                chunk,cost = REF(idx-reflen-jdx,reflen)
-                chunks.append(chunk)
-                clen+=cost
-
-                yield Entry(chunks,clen,mtf)
-
+                for chunks,clen,mtf in clone_prefix_best(idx-reflen):
+                    chunk,cost = REF(idx-reflen-jdx,reflen)
+                    chunks.append(chunk)
+                    clen+=cost
+                    yield Entry(chunks,clen,mtf)
                 reflen+=1
 
-        # try RAW chunks. todo: ignore obviously bad options (e.g. we ignore 1-char RAW chunks but maybe 2 or 3 as well)
+        # try RAW chunks
         for jdx in reversed(range(0,idx)):
-            chunks,clen,mtf=clone_prefix_best(jdx)
+            for chunks,clen,mtf in clone_prefix_best(jdx):
+                if jdx==0 or chunks[-1][0]!='REF':
+                    chunk,cost = RAW(jdx,idx-jdx)
+                    chunks.append(chunk)
+                    clen+=cost
 
-            chunk,cost = RAW(jdx,idx-jdx)
-            chunks.append(chunk)
-            clen+=cost
+                    yield Entry(chunks,clen,mtf)
 
-            yield Entry(chunks,clen,mtf)
-
+    # returns every Entry with a unique mtf (most of them)
     def best_prefix_option(idx):
         opts=list(compress_prefix_options(idx))
         # print("options",idx,code[:idx])
         # for o in opts:
         #     print('  ',o.clen,o.chunks )# ,o.mtf[:8],'...')
-        best=min(opts,key=lambda o: o.clen) #itemgetter('clen'))
-        print('tie',idx,sum(o.clen==best.clen for o in opts))
-        return best
+        # best=min(opts,key=lambda o: o.clen) #itemgetter('clen'))
+        # print('tie',idx,sum(o.clen==best.clen for o in opts))
+        return opts
 
     # find best compression
     dptab = [] # i => (chunks,clen,mtf) mapping
     for idx in range(len(code)+1):
+        print('%d/%d'%(idx,len(code)))
         # compress code[:idx], store in dptab[idx]
         dptab.append(best_prefix_option(idx))
         # print('best',idx,dptab[idx].clen,dptab[idx].chunks,'\n')
+    best_chunks=min(dptab[-1],key=lambda o: o.clen).chunks
     
     # write
     bw = BinaryBitWriter(w.f)
@@ -414,7 +414,7 @@ def compress2(w,code,size_handler=None,fail_on_error=True):
             bw.bits(3, 7)
             count_val -= 7
         bw.bits(3, count_val)
-        print('write_match\t',bw.bit_position-start_pos_bw,offset_val,count_val)
+        print('write_match\t',bw.bit_position-start_pos_bw,offset_val+1,count_val+3)
 
     def write_literal(ch):
         bw.bit(1)
@@ -449,7 +449,7 @@ def compress2(w,code,size_handler=None,fail_on_error=True):
     w.u16(0) # revised below
     start_pos_bw = bw.bit_position
 
-    for chunk in dptab[-1].chunks:
+    for chunk in best_chunks:
         if chunk[0]=='REF':
             offset,length=chunk[1],chunk[2]
             write_match(offset-1,length-3)
@@ -580,7 +580,7 @@ def compress_code(w, code, size_handler=None, debug_handler=None, force_compress
                     bw.bits(3, 7)
                     count_val -= 7
                 bw.bits(3, count_val)
-                print('write_match\t',bw.bit_position-start_pos_bw,offset_val,count_val)
+                print('write_match\t',bw.bit_position-start_pos_bw,offset_val+1,count_val+3)
 
             def write_literal(ch):
                 bw.bit(1)
